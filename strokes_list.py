@@ -18,6 +18,11 @@ idx = 0
 cap = cv2.VideoCapture(0)
 last_pointer_cords = None
 
+
+# Set opencv window size
+cv2.namedWindow('MediaPipe Hands', cv2.WINDOW_NORMAL)
+cv2.resizeWindow('MediaPipe Hands', 1728, 922)
+
 is_open = True
 with mp_hands.Hands(max_num_hands=2, model_complexity=0, min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
     while cap.isOpened():
@@ -86,11 +91,12 @@ with mp_hands.Hands(max_num_hands=2, model_complexity=0, min_detection_confidenc
                     # Erase all points near eraser_cords
                     cv2.circle(board, eraser_cords, eraser_thickess, (0, 0, 0), -1)
         # overlap board to image
-        image = cv2.addWeighted(image, 0.2, board, 0.8, 0)
+        image = cv2.addWeighted(image, 0.5, board, 0.5, 0)
         # Flip the image horizontally for a selfie-view display.
         image = cv2.flip(image, 1)
 
         image = cv2.putText(image, f"{score_1:.2f}  {str(is_open)} {str(is_right)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
 
         cv2.imshow('MediaPipe Hands', image)
         if cv2.waitKey(5) & 0xFF == 27:
