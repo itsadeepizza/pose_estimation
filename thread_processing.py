@@ -6,6 +6,7 @@ import threading
 import time
 import numpy as np
 import mediapipe as mp
+import collections
 
 
 class MediaPipeProcessor():
@@ -17,25 +18,41 @@ class MediaPipeProcessor():
 
         self.frame = None
         self.overlayer = None
-        self.pointer_cords = None
-        self.last_pointer_cords = None
+        self.rigth_pointer_cords = collections.deque([None]*10, maxlen=10)
+        self.rigth_gesture = collections.deque([None]*10, maxlen=10)
+        self.left_pointer_cords = collections.deque([None]*10, maxlen=10)
+        self.left_gesture = collections.deque([None]*10, maxlen=10)
         self.results = None
 
+        # Graphic settings
+        self.pencil_thickness = 3
+        self.eraser_thickness = 50
+
     def process(self, frame):
-        # To improve performance, optionally mark the image as not writeable to
-        # pass by reference
         self.frame = frame
+
+        # Init overlayer if not initialized
         if self.overlayer is None:
             # convert image to np array
             image = np.array(frame)
             # Create a transparent image for opencv
             self.overlayer = np.zeros(image.shape, np.uint8)
 
+        # To improve performance, optionally mark the image as not writeable to pass by reference
         self.frame.flags.writeable = False
         self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
         self.results = self.hands.process(self.frame)
         self.frame.flags.writeable = True
+
+        # Update pointer cords and hand gestures
+        self.update_pointers_cords()
+        self.update_gestures()
+
+        # Update overlayer draws
         self.update_overlayer()
+
+        # Draw hands in AR
+        self.draw_hands_landmarks()
 
         # overlap overlayer to image
         self.frame = cv2.addWeighted(self.frame, 0.5, self.overlayer, 0.5, 0)
@@ -44,36 +61,59 @@ class MediaPipeProcessor():
 
         return self.frame
 
-    def update_overlayer(self):
-        """Update overlayer with the hand strokes"""
+    def get_pointer_cords(self, handeness='Right'):
         if self.results.multi_hand_landmarks:
             for hand_landmarks, multi_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
-                # Check if it is a right hand
-                is_right = multi_handedness.classification[0].label != 'Right'
-
-                # Right hand to draw
-                if is_right:
+                # Check if it the handeness matches ( I need to reverse the condition otherwise it does not work ??)
+                if multi_handedness.classification[0].label != handeness:
                     pointer_cords = np.array((int(hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP].x * self.overlayer.shape[1]), int(hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP].y * self.overlayer.shape[0])))
-                    thickness = 3
+                    return pointer_cords
+        return None
+
+    def get_gesture(self, handeness='Right'):
+        if self.results.multi_hand_landmarks:
+            for hand_landmarks, multi_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
+                # Check if it the handeness matches ( I need to reverse the condition otherwise it does not work ??)
+                if multi_handedness.classification[0].label != handeness:
                     is_open = MediaPipeProcessor.is_hand_open(hand_landmarks)
-                    # Add stroke to board
-                    if not is_open:
-                        if self.last_pointer_cords is not None and np.linalg.norm(pointer_cords - self.last_pointer_cords) < 50:
-                            cv2.line(self.overlayer, self.last_pointer_cords, pointer_cords, (255, 255, 255), thickness)
+                    if is_open:
+                        return 'Open'
                     else:
-                        pointer_cords = None
-                    self.last_pointer_cords = pointer_cords
+                        return 'Closed'
+        return None
 
+    def update_pointers_cords(self):
+        self.left_pointer_cords.append(self.get_pointer_cords('Left'))
+        self.rigth_pointer_cords.append(self.get_pointer_cords('Right'))
 
-                # Left hand to erase
-                else:
-                    eraser_cords = (int(hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP].x * self.overlayer.shape[1]), int(hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP].y * self.overlayer.shape[0]))
-                    eraser_thickess = 30
-                    # Erase all points near eraser_cords
-                    cv2.circle(self.overlayer, eraser_cords, eraser_thickess, (0, 0, 0), -1)
+    def update_gestures(self):
+        self.left_gesture.append(self.get_gesture('Left'))
+        self.rigth_gesture.append(self.get_gesture('Right'))
 
-                # Add the hand landmarks to the image
-                self.mp_drawing.draw_landmarks(self.frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS, self.mp_drawing_styles.get_default_hand_landmarks_style(), self.mp_drawing_styles.get_default_hand_connections_style())
+    def draw_hands_landmarks(self):
+        if self.results.multi_hand_landmarks:
+            for hand_landmarks in self.results.multi_hand_landmarks:
+                self.mp_drawing.draw_landmarks(self.frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+
+    def update_overlayer(self):
+        """Update overlayer with the hand strokes"""
+
+        # Right closed hand to draw
+        # Only if the hand was closed in two last frames
+        if self.rigth_gesture[-1] == 'Closed' and self.rigth_gesture[-2] == 'Closed':
+            # Only if the distance is not too long
+            # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
+            if np.linalg.norm(self.rigth_pointer_cords[-1] - self.rigth_pointer_cords[-2]) < 50:
+                cv2.line(self.overlayer, self.rigth_pointer_cords[-2], self.rigth_pointer_cords[-1], (255, 255, 255), self.pencil_thickness)
+
+        # Left open hand to erase
+        if self.left_gesture[-1] == 'Open' and self.left_gesture[-2] == 'Open':
+            # Only if the distance is not too long
+            # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
+            if np.linalg.norm(self.left_pointer_cords[-1] - self.left_pointer_cords[-2]) < 200:
+                # Erase points using a line
+                cv2.line(self.overlayer, self.left_pointer_cords[-2], self.left_pointer_cords[-1], (0, 0, 0), self.eraser_thickness, -1)
+
 
     @staticmethod
     def is_hand_open(hand_landmarks):
@@ -121,15 +161,18 @@ class VideoCapture:
   def read(self):
     return self.q.get()
 
+# Webcam laptop
+source = 0
+# Webcam phone ipcam
+source = 'http://192.168.1.54:8080/video'
 
-cap = VideoCapture('http://192.168.1.54:8080/video')
+
+cap = VideoCapture(source)
 processor = MediaPipeProcessor()
-frame_timestamps = []
+# Deque to store timestamps of last 10 frames in a circular array
+frame_timestamps = collections.deque(maxlen=10)
 while True:
     frame_timestamps.append(time.time())
-    # Remove the oldest frame timestamp if we're storing too many
-    if len(frame_timestamps) > 10:
-        frame_timestamps.pop(0)
     # calculate the fps
     fps = len(frame_timestamps) / (frame_timestamps[-1] - frame_timestamps[0] + 0.0001)
     frame = cap.read()
