@@ -8,11 +8,10 @@ import numpy as np
 import mediapipe as mp
 import collections
 from config import selected_config as conf
+import pandas as pd
 conf.set_derivate_parameters()
 
-
-
-
+gesture = 'one'
 
 class MediaPipeProcessor():
     def __init__(self):
@@ -33,6 +32,22 @@ class MediaPipeProcessor():
         self.pencil_thickness = 3
         self.eraser_thickness = 50
 
+        #Init dataframe of landmarks
+        self.landmarks_dataset = collections.defaultdict(list)
+
+
+    def record_landmarks(self):
+        """Add last landmarks to the dataset"""
+        if self.results.multi_hand_landmarks:
+            for hand_landmarks, multi_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
+                for landmark_idx, coords in enumerate(hand_landmarks.landmark):
+                    self.landmarks_dataset[f'x{landmark_idx}'].append(coords.x)
+                    self.landmarks_dataset[f'y{landmark_idx}'].append(coords.y)
+                    self.landmarks_dataset[f'z{landmark_idx}'].append(coords.z)
+                self.landmarks_dataset['handedness'].append(multi_handedness.classification[0].label)
+                self.landmarks_dataset['gesture'].append(gesture)
+
+
     def process(self, frame):
         self.frame = frame
 
@@ -51,10 +66,10 @@ class MediaPipeProcessor():
 
         # Update pointer cords and hand gestures
         self.update_pointers_cords()
-        self.update_gestures()
+        self.record_landmarks()
 
         # Update overlayer draws
-        self.update_overlayer()
+        # self.update_overlayer()
 
         # Draw hands in AR
         self.draw_hands_landmarks()
@@ -139,7 +154,6 @@ class MediaPipeProcessor():
         is_open = score_1 > 1
         return is_open
 
-
 # bufferless VideoCapture
 class VideoCapture:
 
@@ -183,6 +197,7 @@ cap = VideoCapture()
 processor = MediaPipeProcessor()
 # Deque to store timestamps of last 10 frames in a circular array
 frame_timestamps = collections.deque(maxlen=10)
+start_time = time.time()
 while True:
     frame_timestamps.append(time.time())
     # calculate the fps
@@ -194,3 +209,8 @@ while True:
     cv2.imshow(cap.window_name, frame)
     if chr(cv2.waitKey(1)&255) == 'q':
         break
+    if time.time() - start_time > 60:
+        break
+
+df = pd.DataFrame(processor.landmarks_dataset)
+df.to_csv('landmarks.csv', index=False)
