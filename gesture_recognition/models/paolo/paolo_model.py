@@ -92,20 +92,22 @@ class BaseGestureRecognitionModel():
         self.classes = data['classes']
 
     def normalise(self, X):
-        # For each position, calculate the mean of all landmarks, and subtract it from the landmarks
-        # This will make the model invariant to the position of the hand
+        """Normalise landmarks coordinates to make the model invariant to the position or the angle of the hand"""
+        # Convert landmarks to 3D vectors
         n = X.shape[0]
         X_as_vectors = np.array([X[:, 0:-1:3], X[:, 1:-1:3], X[:, 2:-1:3]])
         # rotate axis
         X_as_vectors = np.moveaxis(X_as_vectors, 0, -1)
-        # Center on the origin
+        # ----------------------
+        # Normalize position: center on the origin
         X_as_vectors -= X_as_vectors.mean(axis=1)[:, None, :]
-
-
-        # Calculate vector landmark 0 -> landmark 5
-        # This will make the model invariant to the orientation of the hand
+        # ----------------------
+        # Normalize dimension dividing by the norm of the vector landmark 0 (wrist) -> landmark 5 (index_finger_mcp
         hand_vector = X_as_vectors[:, 5, :] - X_as_vectors[:, 0, :]
-        # normalise
+        X_as_vectors /= np.linalg.norm(hand_vector, axis=1)[:, None, None]
+        #----------------------
+        # Normalize angle: align the hand vector with the x axis
+        # normalise hand vector
         hand_vector /= np.linalg.norm(hand_vector, axis=1)[:, None]
         # Calculate the angle between the vector projection on the x-y plane and the x axis
         angle_x = np.arctan2(hand_vector[:, 1], hand_vector[:, 0])
@@ -140,7 +142,7 @@ class BaseGestureRecognitionModel():
             rot_mat = rotation_matrix_xz[:, :, i]
             X_as_vectors[i, :, :] = np.matmul(vecs, rot_mat)
         # Now the and vector is aligned with the x axis
-
+        # ----------------------
         # COnvert back to 1D array
         X_normalised = np.reshape(X_as_vectors, (X_as_vectors.shape[0], -1))
         return X_normalised
@@ -201,3 +203,4 @@ if __name__ == '__main__':
     model = SVCModel()
     model.fit()
     model.save('svc.pkl')
+    model.grid_search()
