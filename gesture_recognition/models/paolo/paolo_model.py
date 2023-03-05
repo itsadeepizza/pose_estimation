@@ -25,6 +25,10 @@ class BaseGestureRecognitionModel():
             df['is_right'] = 0
             df.loc[df['handedness'] == 'Right', 'is_right'] = 1
             df.drop(columns=['handedness'], inplace=True)
+        # Keep only left hands (as the dataset contains only left hands
+        df = df[df['is_right'] == 0]
+        df.drop(columns=['is_right'], inplace=True)
+
         # replace 'gesture' column by multiple dummy columns
         labels_train = pd.get_dummies(df_train['gesture'])
         df_train.drop(columns=['gesture'], inplace=True)
@@ -87,19 +91,59 @@ class BaseGestureRecognitionModel():
         self.scaler = data['scaler']
         self.classes = data['classes']
 
-    def normalise(self, df):
+    def normalise(self, X):
         # For each position, calculate the mean of all landmarks, and subtract it from the landmarks
         # This will make the model invariant to the position of the hand
+        n = X.shape[0]
+        X_as_vectors = np.array([X[:, 0:-1:3], X[:, 1:-1:3], X[:, 2:-1:3]])
+        # rotate axis
+        X_as_vectors = np.moveaxis(X_as_vectors, 0, -1)
+        # Center on the origin
+        X_as_vectors -= X_as_vectors.mean(axis=1)[:, None, :]
 
-        x_mean = df[:, 0:-1:3].mean(axis=1)
-        y_mean = df[:, 1:-1:3].mean(axis=1)
-        z_mean = df[:, 2:-1:3].mean(axis=1)
 
-        df[:, 0:-1:3] -= x_mean[:, None]
-        df[:, 1:-1:3] -= y_mean[:, None]
-        df[:, 2:-1:3] -= z_mean[:, None]
+        # Calculate vector landmark 0 -> landmark 5
+        # This will make the model invariant to the orientation of the hand
+        hand_vector = X_as_vectors[:, 5, :] - X_as_vectors[:, 0, :]
+        # normalise
+        hand_vector /= np.linalg.norm(hand_vector, axis=1)[:, None]
+        # Calculate the angle between the vector projection on the x-y plane and the x axis
+        angle_x = np.arctan2(hand_vector[:, 1], hand_vector[:, 0])
 
-        return df
+        # Calculate the 3D rotation matrix for aligning the projection of the hand vector with the x axis
+        rotation_matrix_xy = np.array([
+            [np.cos(angle_x), -np.sin(angle_x), np.zeros(n)],
+            [np.sin(angle_x), np.cos(angle_x), np.zeros(n)],
+            [np.zeros(n), np.zeros(n), np.ones(n)]
+        ])
+        # Rotate the landmarks
+        for i in range(n):
+            vecs = X_as_vectors[i, :, :]
+            rot_mat = rotation_matrix_xy[:, :, i]
+            X_as_vectors[i, :, :] = np.matmul(vecs, rot_mat)
+
+        # Update hand vector
+        hand_vector = X_as_vectors[:, 5, :] - X_as_vectors[:, 0, :]
+        # normalise
+        hand_vector /= np.linalg.norm(hand_vector, axis=1)[:, None]
+        # Calculate the angle between the hand vector and the z axis
+        angle_z = np.arctan2(hand_vector[:, 2], hand_vector[:, 0])
+        # Calculate the 3D rotation matrix for aligning the hand vector with the x axis
+        rotation_matrix_xz = np.array([
+            [np.cos(angle_z), np.zeros(n), -np.sin(angle_z)],
+            [np.zeros(n), np.ones(n), np.zeros(n)],
+            [np.sin(angle_z), np.zeros(n), np.cos(angle_z)]
+        ])
+        # Rotate the landmarks
+        for i in range(n):
+            vecs = X_as_vectors[i, :, :]
+            rot_mat = rotation_matrix_xz[:, :, i]
+            X_as_vectors[i, :, :] = np.matmul(vecs, rot_mat)
+        # Now the and vector is aligned with the x axis
+
+        # COnvert back to 1D array
+        X_normalised = np.reshape(X_as_vectors, (X_as_vectors.shape[0], -1))
+        return X_normalised
 
     def grid_search(self):
         train_X, train_y, _, _ = self.prepare_dataset()
@@ -117,6 +161,21 @@ class BaseGestureRecognitionModel():
         print(grid_search.best_params_)
         results = pd.DataFrame(grid_search.cv_results_)
         print(results[['params', 'mean_test_score', 'rank_test_score']])
+
+    def normalise_landmarks(self, hand_landmarks, handeness):
+        landmark_list = []
+        invert_hand = 1 if handeness == "Left" else -1
+        for landmark_idx, coords in enumerate(hand_landmarks.landmark):
+            landmark_list.append(coords.x * invert_hand)
+            landmark_list.append(coords.y)
+            landmark_list.append(coords.z)
+        # We predict using left hand, but invert x coordinates if the hand is right
+        # Pay attention, handeness is inverted in the dataset
+        landmark_list.append(0)
+        X = np.array([landmark_list])
+        X = self.normalise(X)
+        X = self.scaler.transform(X)
+        return X
 
 
 class SVCModel(BaseGestureRecognitionModel):
