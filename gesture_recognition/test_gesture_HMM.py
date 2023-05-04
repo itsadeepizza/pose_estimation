@@ -1,3 +1,8 @@
+from models.paolo.paolo_model import SVCModel
+
+model = SVCModel()
+model.load('models/paolo/svc.pkl')
+
 import cv2
 import concurrent.futures
 import logging
@@ -8,11 +13,40 @@ import numpy as np
 import mediapipe as mp
 import collections
 from config import selected_config as conf
-import pandas as pd
-conf.VIDEO_SOURCE = 'http://192.168.1.54:8080/video'
 conf.set_derivate_parameters()
 
-gesture = 'spiderman'
+# Set size of text and bars on the overlay
+ui_size = 40 #px
+
+class HMMFiltering():
+    def __init__(self, trans_mat, alfa_0, freqs, model):
+        """
+        :param trans_mat: Transition matrix of the HMM
+        :param alfa_0: Initial values for alpha_t
+        :param freqs: Frequencies of the hidden states in model train dataset
+        """
+        self.trans_mat = trans_mat
+        self.alfa_0 = alfa_0
+        self.freqs = freqs
+        self.alfa_t = self.alfa_0
+
+    def update_alfa(self, unfiltered_probs):
+        """Calculate alpha_t+1 given the observation y_t"""
+        first_coeff = np.array(list(unfiltered_probs.values()) )/ self.freqs
+        second_coeff = 0
+        for i in range(len(self.alfa_t)):
+            second_coeff += self.trans_mat[i] * self.alfa_t[i]
+        self.alfa_t = first_coeff * second_coeff
+        # Normalize alfa_t to avoid numerical errors
+        self.alfa_t = self.alfa_t / sum(self.alfa_t)
+
+
+    def predict_proba(self, unfiltered_probs):
+        """Calculate the hidden state probability given the observation y_t"""
+        classes = unfiltered_probs.keys()
+        self.update_alfa(unfiltered_probs)
+        return {gesture: prob for gesture, prob in zip(classes, self.alfa_t/sum(self.alfa_t))}
+
 
 class MediaPipeProcessor():
     def __init__(self):
@@ -33,21 +67,19 @@ class MediaPipeProcessor():
         self.pencil_thickness = 3
         self.eraser_thickness = 50
 
-        #Init dataframe of landmarks
-        self.landmarks_dataset = collections.defaultdict(list)
+        # Init the HMMmodel
+        prob_trans = 0.01
+        n = 5
+        trans_mat = np.ones((n, n)) * prob_trans
+        # Set the diagonal of trans_mat to 0.99
+        trans_mat.flat[::n+1] = 1 - prob_trans * (n-1)
 
-
-    def record_landmarks(self):
-        """Add last landmarks to the dataset"""
-        if self.results.multi_hand_landmarks:
-            for hand_landmarks, multi_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
-                for landmark_idx, coords in enumerate(hand_landmarks.landmark):
-                    self.landmarks_dataset[f'x{landmark_idx}'].append(coords.x)
-                    self.landmarks_dataset[f'y{landmark_idx}'].append(coords.y)
-                    self.landmarks_dataset[f'z{landmark_idx}'].append(coords.z)
-                self.landmarks_dataset['handedness'].append(multi_handedness.classification[0].label)
-                self.landmarks_dataset['gesture'].append(gesture)
-
+        self.hmm = HMMFiltering(
+            trans_mat=trans_mat,
+            alfa_0=np.array([0] * (n - 1) + [1]),
+            freqs=np.array([0.2] * n),
+            model=model
+            )
 
     def process(self, frame):
         self.frame = frame
@@ -61,26 +93,31 @@ class MediaPipeProcessor():
 
         # To improve performance, optionally mark the image as not writeable to pass by reference
         self.frame.flags.writeable = False
+        # Changes the color space in order to use Mediapipe
         self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
         self.results = self.hands.process(self.frame)
+        # Changes the color space back to BGR for rendering with OpenCV
         self.frame = cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR)
         self.frame.flags.writeable = True
 
         # Update pointer cords and hand gestures
         self.update_pointers_cords()
-        self.record_landmarks()
-
-        # Update overlayer draws
-        # self.update_overlayer()
+        self.update_gestures()
 
         # Draw hands in AR
         self.draw_hands_landmarks()
 
-        # overlap overlayer to image
-        self.frame = cv2.addWeighted(self.frame, 0.5, self.overlayer, 0.5, 0)
         # Flip the image horizontally for a selfie-view display.
         self.frame = cv2.flip(self.frame, 1)
+        # Plot gesture recognition
+        self.update_overlayer()
 
+
+        # Flip the image horizontally for a selfie-view display.
+
+        # overlap overlayer to image
+        self.frame = np.where(self.overlayer != 0, self.overlayer, self.frame)
+        # self.frame = cv2.addWeighted(self.frame, 0.5, self.overlayer, 0.5, 0)
         return self.frame
 
     def get_pointer_cords(self, handeness='Right'):
@@ -93,23 +130,26 @@ class MediaPipeProcessor():
         return None
 
     def get_gesture(self, handeness='Right'):
+        hand_detected = False
         if self.results.multi_hand_landmarks:
             for hand_landmarks, multi_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
                 # Check if it the handeness matches ( I need to reverse the condition otherwise it does not work ??)
                 if multi_handedness.classification[0].label != handeness:
-                    is_open = MediaPipeProcessor.is_hand_open(hand_landmarks)
-                    if is_open:
-                        return 'Open'
-                    else:
-                        return 'Closed'
-        return None
+                    # probs = {"open_hand": 0, "closed_hand": 0, "one": 0, "spiderman": 1}
+                    unfiltered_probs = model.predict_proba(hand_landmarks, multi_handedness.classification[0].label)
+                    unfiltered_probs["no_hand"] = 0
+                    hand_detected = True
+        if not hand_detected:
+            unfiltered_probs = {"hand_closed": 0.05, "hand_opened": 0.05, "one": 0.05, "spiderman": 0.05, "no_hand": 0.8}
+        filtered_probs = self.hmm.predict_proba(unfiltered_probs)
+        return filtered_probs, unfiltered_probs
 
     def update_pointers_cords(self):
         self.left_pointer_cords.append(self.get_pointer_cords('Left'))
         self.rigth_pointer_cords.append(self.get_pointer_cords('Right'))
 
     def update_gestures(self):
-        self.left_gesture.append(self.get_gesture('Left'))
+        # self.left_gesture.append(self.get_gesture('Left'))
         self.rigth_gesture.append(self.get_gesture('Right'))
 
     def draw_hands_landmarks(self):
@@ -119,46 +159,32 @@ class MediaPipeProcessor():
 
     def update_overlayer(self):
         """Update overlayer with the hand strokes"""
+        self.overlayer = np.zeros(self.overlayer.shape, np.uint8)
+        # Create an empty overlayer
+        unfiltered_layer = np.zeros(self.overlayer.shape, np.uint8)
 
-        # Right closed hand to draw
-        # Only if the hand was closed in two last frames
-        if self.rigth_gesture[-1] == 'Closed' and self.rigth_gesture[-2] == 'Closed':
-            # Only if the distance is not too long
-            # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
-            if np.linalg.norm(self.rigth_pointer_cords[-1] - self.rigth_pointer_cords[-2]) < 50:
-                cv2.line(self.overlayer, self.rigth_pointer_cords[-2], self.rigth_pointer_cords[-1], (255, 255, 255), self.pencil_thickness)
+        filtered_probs = self.rigth_gesture[-1][0]
+        unfiltered_probs = self.rigth_gesture[-1][1]
+        print(filtered_probs)
+        # Show gesture probabilities as gauge bars
+        if filtered_probs is not None:
+            for i, (gesture, prob) in enumerate(filtered_probs.items()):
+                cv2.rectangle(self.overlayer, (0, i*ui_size), (int(prob*ui_size*5), (i+1)*ui_size), (255, 0, 0), -1)
 
-        # Left open hand to erase
-        if self.left_gesture[-1] == 'Open' and self.left_gesture[-2] == 'Open':
-            # Only if the distance is not too long
-            # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
-            if np.linalg.norm(self.left_pointer_cords[-1] - self.left_pointer_cords[-2]) < 200:
-                # Erase points using a line
-                cv2.line(self.overlayer, self.left_pointer_cords[-2], self.left_pointer_cords[-1], (0, 0, 0), self.eraser_thickness, -1)
+            for i, (gesture, prob) in enumerate(unfiltered_probs.items()):
+                cv2.rectangle(self.overlayer, (0, i*ui_size), (int(prob*ui_size*5), (i+1)*ui_size), (0, 255, 0), -1)
+                cv2.putText(self.overlayer, gesture, (0, (i+1)*ui_size), cv2.FONT_HERSHEY_SIMPLEX, ui_size/40, (255, 255, 255), int(ui_size/20), cv2.LINE_AA)
+        # Add a legend with green and blue squares at theright of the screen
+        cv2.rectangle(self.overlayer, (ui_size * 6, 0), (ui_size * 7, ui_size), (0, 255, 0), -1)
+        cv2.putText(self.overlayer, "Unfiltered", (int(ui_size * 7.5), ui_size), cv2.FONT_HERSHEY_SIMPLEX, ui_size/40, (255, 255, 255), int(ui_size/20), cv2.LINE_AA)
+        cv2.rectangle(self.overlayer, (ui_size * 6, int(ui_size * 1.5)), (ui_size * 7, int(ui_size * 2.5)), (255, 0, 0), -1)
+        cv2.putText(self.overlayer, "Filtered", (int(ui_size * 7.5), int(ui_size * 2.5)), cv2.FONT_HERSHEY_SIMPLEX, ui_size/40, (255, 255, 255), int(ui_size/20), cv2.LINE_AA)
+
+        #Overlap unfiltered probs to overlayer
+        # self.overlayer = cv2.addWeighted(self.overlayer, 0.5, unfiltered_layer, 0.5, 0.5)
 
 
-    @staticmethod
-    def is_hand_open(hand_landmarks):
-        """Check if the hand is open or closed"""
-        # Calculate std of tip of the fingers
-        mp_hands = mp.solutions.hands
-        fingers_x = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].x])
-        fingers_y = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].y])
-        fingers_z = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].z])
-        tip_fingers_var = np.var(fingers_y) + np.var(fingers_x) + np.var(fingers_z)
-        # Calculate std of n of the knuckles
-        knuckles_x = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].x])
-        knuckles_y = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].y])
-        knuckles_z = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].z])
-        knuckles_var = np.var(knuckles_y) + np.var(knuckles_x) + np.var(knuckles_z)
-        score_1 = np.sqrt(tip_fingers_var / knuckles_var)
-
-        is_open = score_1 > 1
-        return is_open
-
-# bufferless VideoCapture
 class VideoCapture:
-
   def __init__(self):
     self.cap = cv2.VideoCapture(conf.VIDEO_SOURCE)
     # Set opencv window size
@@ -189,17 +215,16 @@ class VideoCapture:
 # Webcam laptop
 source = 0
 # Webcam phone ipcam
-# source = 'http://192.168.1.54:8080/video'
+source = 'http://192.168.1.54:8080/video'
 
 conf.VIDEO_SOURCE = source
 conf.RESOLUTION = (640, 480)
 
 
-cap = VideoCapture()
+cap       = VideoCapture()
 processor = MediaPipeProcessor()
 # Deque to store timestamps of last 10 frames in a circular array
 frame_timestamps = collections.deque(maxlen=10)
-start_time = time.time()
 while True:
     frame_timestamps.append(time.time())
     # calculate the fps
@@ -207,12 +232,7 @@ while True:
     frame = cap.read()
     frame = processor.process(frame)
 
-    cv2.putText(frame, "FPS: {:.2f}".format(fps), (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(frame, "FPS: {:.2f}".format(fps), (frame.shape[1]-ui_size*5, ui_size), cv2.FONT_HERSHEY_SIMPLEX, int(ui_size/40), (0, 255, 0), int(ui_size/20))
     cv2.imshow(cap.window_name, frame)
     if chr(cv2.waitKey(1)&255) == 'q':
         break
-    if time.time() - start_time > 120:
-        break
-
-df = pd.DataFrame(processor.landmarks_dataset)
-df.to_csv('landmarks.csv', index=False)
