@@ -1,4 +1,4 @@
-# A virtual whiteboard by hand gestures recognition
+# A virtual whiteboard with hand gestures recognition
 
 This project is an implementation of a virtual whiteboard using hand gestures recognition. The project is based on the MediaPipe library and is entirely written in Python.
 You write with the right hand, using the "one" gesture, and you can erase with the left hand, using an open hand.

@@ -110,8 +110,12 @@ class MediaPipeProcessor():
         self.results = None
 
         # Graphic settings
-        self.pencil_thickness = 3
-        self.eraser_thickness = 50
+        self.pencil_thickness = 15
+        self.eraser_thickness = 200
+        self.pencil_color = (1, 1, 1) # RGB, must be different from (0,0,0)
+        self.max_distance = 1000 # Max admissible distance in pixel between two consecutive points
+
+        self.pencil_color_BGR = (self.pencil_color[2], self.pencil_color[1], self.pencil_color[0])
 
         # Init the Kalman filtering
         self.kalman_filtering = {
@@ -222,13 +226,13 @@ class MediaPipeProcessor():
             # Only if the distance is not too long
             # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
             if np.linalg.norm(self.rigth_pointer_cords[-1] - self.rigth_pointer_cords[-2]) < 50:
-                cv2.line(self.overlayer, self.rigth_pointer_cords[-2], self.rigth_pointer_cords[-1], (255, 255, 255), self.pencil_thickness)
+                cv2.line(self.overlayer, self.rigth_pointer_cords[-2], self.rigth_pointer_cords[-1], self.pencil_color_BGR, self.pencil_thickness)
 
         # Left open hand to erase
         if self.left_gesture[-1] == 'hand_opened' and self.left_gesture[-2] == 'hand_opened':
             # Only if the distance is not too long
             # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
-            if np.linalg.norm(self.left_pointer_cords[-1] - self.left_pointer_cords[-2]) < 200:
+            if np.linalg.norm(self.left_pointer_cords[-1] - self.left_pointer_cords[-2]) < self.max_distance:
                 # Erase points using a line
                 cv2.line(self.overlayer, self.left_pointer_cords[-2], self.left_pointer_cords[-1], (0, 0, 0), self.eraser_thickness, -1)
 
@@ -261,7 +265,8 @@ class VideoCapture:
     # Set opencv window size
     self.window_name = conf.WINDOW_NAME
     cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(self.window_name, conf.RESOLUTION[0], conf.RESOLUTION[1])
+    if conf.RESOLUTION is not None:
+        cv2.resizeWindow(self.window_name, conf.RESOLUTION[0], conf.RESOLUTION[1])
     self.q = queue.Queue()
     t = threading.Thread(target=self._reader)
     t.daemon = True
@@ -289,7 +294,7 @@ source = 0
 # source = 'http://192.168.1.54:8080/video'
 
 conf.VIDEO_SOURCE = source
-conf.RESOLUTION = (640, 480)
+conf.RESOLUTION = None #(640, 480)
 
 
 cap = VideoCapture()
