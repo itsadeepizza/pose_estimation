@@ -16,8 +16,8 @@ from config import selected_config as conf
 conf.set_derivate_parameters()
 
 
-class KalmanFiltering():
-    def __init__(self, r, q_p, q_v, p_p, p_v, delta_t):
+class KalmanFiltering:
+    def __init__(self, r, q_p, q_v, p_p, p_v):
         self.r = r
         self.q_p = q_p
         self.q_v = q_v
@@ -59,9 +59,7 @@ class KalmanFiltering():
         return last_position + last_speed * delta_t
 
 
-
-
-class HMMFiltering():
+class HMMFiltering:
     def __init__(self, trans_mat, alfa_0, freqs, model):
         """
         :param trans_mat: Transition matrix of the HMM
@@ -91,18 +89,16 @@ class HMMFiltering():
         return {gesture: prob for gesture, prob in zip(classes, self.alfa_t/sum(self.alfa_t))}
 
 
-
-class MediaPipeProcessor():
+class MediaPipeProcessor:
 
     def __init__(self):
-
         self.mp_drawing        = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         self.mp_hands          = mp.solutions.hands
         self.hands             = self.mp_hands.Hands(max_num_hands=2, model_complexity=1, min_detection_confidence=0.5, min_tracking_confidence=0.5, static_image_mode=False)
 
         self.frame = None
-        self.overlayer = None
+        self.overlayer = self.debug_layer = None
         self.rigth_pointer_cords = collections.deque([None]*conf.LEN_QUEUE_MEDIAPIPE, maxlen=conf.LEN_QUEUE_MEDIAPIPE)
         self.rigth_gesture = collections.deque([None]*conf.LEN_QUEUE_MEDIAPIPE, maxlen=conf.LEN_QUEUE_MEDIAPIPE)
         self.left_pointer_cords = collections.deque([None]*conf.LEN_QUEUE_MEDIAPIPE, maxlen=conf.LEN_QUEUE_MEDIAPIPE)
@@ -110,32 +106,55 @@ class MediaPipeProcessor():
         self.results = None
 
         # Graphic settings
-        self.pencil_thickness = 15
-        self.eraser_thickness = 200
+        self.pencil_thickness = 6
+        self.eraser_thickness = 120
         self.pencil_color = (1, 1, 1) # RGB, must be different from (0,0,0)
         self.max_distance = 1000 # Max admissible distance in pixel between two consecutive points
+        self.ui_size = 22 # For font size and other UI related elements
 
         self.pencil_color_BGR = (self.pencil_color[2], self.pencil_color[1], self.pencil_color[0])
 
-        # Init the Kalman filtering
+        # Debug Variable
+        self.debug = True
+        self.debug_cache = {'filtered_probs':{}}
+
+        # INIT THE KALMAN FILTERING
         self.kalman_filtering = {
-            handeness: KalmanFiltering(r=2, q_p=10, q_v=200, p_p=10, p_v=10, delta_t=1 / 30) for handeness in ["Left", "Right"]
+            handeness: KalmanFiltering(
+                r=2, # Noise mesure
+                q_p=10, # Noise position update
+                q_v=200, # Noise speed update
+                p_p=10, # Prior position (not very important)
+                p_v=10, # Prior speed (not very important)
+                ) for handeness in ["Left", "Right"]
             }
 
-        # Init the HMMmodel
-        prob_trans = 0.01
-        n = 5
+        # INIT THE HMM FILTERING
+        # Building transition matrix, you can specify your own
+        # Probability of gesture transition (very important) decrease it to make the gesture more stable, increase it to make the gesture more reactive
+        prob_trans = 0.0001
+        n = 5 # Number of recognized gesture
         trans_mat = np.ones((n, n)) * prob_trans
-        # Set the diagonal of trans_mat to 0.99
+        # Make transition matrix using prob_trans
         trans_mat.flat[::n+1] = 1 - prob_trans * (n-1)
+        trans_mat = np.array([
+            [0.99, 0.01, 0.01, 0.01, 0.01],
+            [0.01, 0.99, 0.01, 0.01, 0.01],
+            [0.0001, 0.0001, 0.9999, 0.0001, 0.0001], # This gesture ("One") is more stable
+            [0.01, 0.01, 0.01, 0.99, 0.01],
+            [0.01, 0.01, 0.01, 0.01, 0.99],
+            ])
+        # trans_mat = dummy_trans_mat = np.ones((n, n)) / n # Dummy transition matrix = No HMM filtering
 
-
+        alfa_0 = np.array([0] * (n - 1) + [1]) #Initial state, not very important
+        # freqs = np.array([0.2] * n) #Priori probability = distribution of the train dataset
+        freqs = [1, 1, 2, 10, 1] # (you can specify your own for prioritise some gesture) BIGGER values means LESS priority
         self.hmm = {
             handeness: HMMFiltering(
                     trans_mat=trans_mat,
-                    alfa_0=np.array([0] * (n - 1) + [1]),
-                    freqs=np.array([0.2] * n),
-                    model=model
+                    alfa_0=alfa_0,
+                    freqs=freqs,
+                    model=model # Model to use for the inference
                     )
             for handeness in ["Left", "Right"]
             }
@@ -149,6 +168,7 @@ class MediaPipeProcessor():
             image = np.array(frame)
             # Create a transparent image for opencv
             self.overlayer = np.zeros(image.shape, np.uint8)
+
 
         # To improve performance, optionally mark the image as not writeable to pass by reference
         self.frame.flags.writeable = False
@@ -165,12 +185,19 @@ class MediaPipeProcessor():
 
         # Draw hands in AR
         self.draw_hands_landmarks()
+
+
         # Plot Board
         self.update_overlayer()
         # overlap overlayer to image
         self.frame = np.where(self.overlayer != 0, self.overlayer, self.frame)
         # Flip the image horizontally for a selfie-view display.
         self.frame = cv2.flip(self.frame, 1)
+        # Show debug info
+        if self.debug:
+            self.draw_debug_info()
+            self.frame = np.where(self.debug_layer != 0, self.debug_layer, self.frame)
+
 
         return self.frame
 
@@ -201,6 +228,7 @@ class MediaPipeProcessor():
         filtered_probs = self.hmm[handeness].predict_proba(unfiltered_probs)
         # Return gesture with max probability
         detected_gesture = max(filtered_probs, key=filtered_probs.get)
+        self.debug_cache['filtered_probs'][handeness] = filtered_probs
 
         return detected_gesture
 
@@ -225,7 +253,7 @@ class MediaPipeProcessor():
         if self.rigth_gesture[-1] == 'one' and self.rigth_gesture[-2] == 'one':
             # Only if the distance is not too long
             # TODO: if gesture != None then coordinates should be different from None too, maybe implement this in more robust way
-            if np.linalg.norm(self.rigth_pointer_cords[-1] - self.rigth_pointer_cords[-2]) < 50:
+            if np.linalg.norm(self.rigth_pointer_cords[-1] - self.rigth_pointer_cords[-2]) < self.max_distance:
                 cv2.line(self.overlayer, self.rigth_pointer_cords[-2], self.rigth_pointer_cords[-1], self.pencil_color_BGR, self.pencil_thickness)
 
         # Left open hand to erase
@@ -237,24 +265,14 @@ class MediaPipeProcessor():
                 cv2.line(self.overlayer, self.left_pointer_cords[-2], self.left_pointer_cords[-1], (0, 0, 0), self.eraser_thickness, -1)
 
 
-    @staticmethod
-    def is_hand_open(hand_landmarks):
-        """Check if the hand is open or closed"""
-        # Calculate std of tip of the fingers
-        mp_hands = mp.solutions.hands
-        fingers_x = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].x, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].x])
-        fingers_y = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].y, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].y])
-        fingers_z = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].z, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP].z])
-        tip_fingers_var = np.var(fingers_y) + np.var(fingers_x) + np.var(fingers_z)
-        # Calculate std of n of the knuckles
-        knuckles_x = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].x])
-        knuckles_y = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].y, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].y])
-        knuckles_z = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].z, hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_CMC].z])
-        knuckles_var = np.var(knuckles_y) + np.var(knuckles_x) + np.var(knuckles_z)
-        score_1 = np.sqrt(tip_fingers_var / knuckles_var)
-
-        is_open = score_1 > 1
-        return is_open
+    def draw_debug_info(self):
+        # Show gesture probabilities as gauge bars
+        self.debug_layer = np.zeros(self.frame.shape, np.uint8)
+        filtered_probs = self.debug_cache['filtered_probs']['Right']
+        if filtered_probs is not None:
+            for i, (gesture, prob) in enumerate(filtered_probs.items()):
+                cv2.rectangle(self.debug_layer, (0, i * self.ui_size), (int(prob * self.ui_size * 5), (i + 1) * self.ui_size), (255, 0, 0), -1)
+                cv2.putText(self.debug_layer, gesture, (0, (i + 1) * self.ui_size), cv2.FONT_HERSHEY_SIMPLEX, self.ui_size / 40, (255, 255, 255), int(self.ui_size / 20), cv2.LINE_AA)
 
 
 # bufferless VideoCapture
