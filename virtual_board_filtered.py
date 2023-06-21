@@ -18,19 +18,27 @@ conf.set_derivate_parameters()
 
 class KalmanFiltering:
     def __init__(self, r, q_p, q_v, p_p, p_v):
+        # r: measurement noise
         self.r = r
+        # q_p: process noise for position
         self.q_p = q_p
+        # q_v: process noise for velocity
         self.q_v = q_v
+        # p_p: initial position error
         self.p_p = p_p
+        # p_v: initial velocity error
         self.p_v = p_v
 
-
+        # Build noise matrix from r
         self.R = np.diag([self.r, self.r])
+        # Build process noise matrix from q_p and q_v
         self.Q = np.diag([self.q_p, self.q_p, self.q_v, self.q_v])
+        # Build initial state vector
         self.x_n = np.array([[0], [0], [0], [0]])
-
+        # This is just a projection matrix, for extracting position from state vector
         self.H = np.array([[1, 0, 0, 0],
                             [0, 1, 0, 0]])
+        # Build initial state error matrix
         self.P_n = np.diag([self.p_p, self.p_p, self.p_v, self.p_v])
         self.t_n = time.time()
 
@@ -38,14 +46,20 @@ class KalmanFiltering:
     def update(self, z_n):
         delta_t = time.time() - self.t_n
         self.t_n = time.time()
+        # Build state transition matrix
         self.A = np.array([[1, 0, delta_t, 0],
                            [0, 1, 0, delta_t],
                            [0, 0, 1, 0],
                            [0, 0, 0, 1]])
+        # priori estimate appying the state transition matrix
         self.x_p = self.A @ self.x_n
+        # priori error covariance matrix
         self.P_p = self.A @ self.P_n @ self.A.transpose() + self.Q * delta_t
+        # Kalman gain
         self.K_n = self.P_p @ self.H.transpose() @ np.linalg.inv((self.H @ self.P_p @ self.H.transpose() + self.R))
+        # posteriori estimate obtained combining the priori estimate with the measurement
         self.x_n = self.x_p + self.K_n @ (z_n - self.H @ self.x_p)
+        # posteriori error covariance matrix
         self.P_n = self.P_p - self.K_n @ self.H @ self.P_p
 
     def last_position(self):
